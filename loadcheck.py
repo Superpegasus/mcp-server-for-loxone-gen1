@@ -73,7 +73,12 @@ def verify_load(expected: Path, main_files: list[Path], cleanup: bool = False, t
     d = diff_projects(exp, ms)
     out = {"miniserver_programm_seit": version, "gewartet_s": waited, "erwartet": expected.name,
            "projektzeit_datei": exp_date, "sicherung": {k: b[k] for k in ("geaendert", "datei") if k in b}}
-    if d.get("gleich"):
+    older = bool(version and exp_date and str(version)[:19] < str(exp_date)[:19])
+    if d.get("gleich") and older:
+        # Inhalt passt (Heizpläne, Werte …), aber der Miniserver hat die Datei nicht nach ihrem Speichern bekommen
+        out["ergebnis"] = (f"ACHTUNG – das Programm im Miniserver ({version}) ist älter als {expected.name} ({exp_date}). "
+                           "Vermutlich wurde die Datei noch nicht geladen.")
+    elif d.get("gleich"):
         out["ergebnis"] = f"OK – im Miniserver läuft {expected.name}."
         if cleanup:
             old = [p for p in main_files if p != expected]

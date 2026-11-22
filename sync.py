@@ -46,13 +46,20 @@ def diff_projects(a: Project, b: Project, common_types_only: bool = False) -> di
         o = a.blocks.get(u)
         if o is None:
             continue
-        if o.title != x.title:
+        # Platzhalter-Titel zieht Loxone Config beim Laden selbst auf den Namen des Ziels nach
+        if o.title != x.title and not b.is_ref(x):
             changed.append(f"{b.name(x)}: Name '{o.title}' -> '{x.title}'")
+        ot, nt = o.elem.find("Timer"), x.elem.find("Timer")   # Heizplan der Raumregler
+        if ot is not None and nt is not None and not common_types_only:
+            sig = lambda t: [tuple(sorted(e.attrib.items())) for e in t.findall("Entry")]  # noqa: E731
+            if sig(ot) != sig(nt):
+                changed.append(f"{b.name(x)}: Heizplan geändert")
         for c in x.connectors:
             oc = o.connector(c.key)
             if oc is None:
                 continue
-            if oc.default != c.default and not (common_types_only and oc.default is None):
+            # Standardwert an einem verbundenen Eingang ist wirkungslos; Config lässt ihn beim Laden weg
+            if oc.default != c.default and not (common_types_only and oc.default is None) and not (c.sources or oc.sources):
                 changed.append(f"{b.name(x)}.{c.key}: Wert {oc.default} -> {c.default}")
             if oc.inverted != c.inverted:
                 changed.append(f"{b.name(x)}.{c.key}: {'jetzt negiert' if c.inverted else 'nicht mehr negiert'}")

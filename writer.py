@@ -123,6 +123,63 @@ class ProjectText:
     def _replace(self, start: int, end: int, new: str) -> None:
         self.text = self.text[:start] + new + self.text[end:]
 
+    def set_timer_entries(self, uuid: str, entries: list) -> None:
+        """Ersetzt die Heizplan-Einträge (<Timer>) eines Objekts. entries: (von_min|None, bis_min, Ix|None, V)."""
+        open_m = self._c_open(uuid)
+        close = self._c_close(open_m)
+        if close < 0:
+            raise WriteError("Das Objekt hat keinen Heizplan.")
+        base = open_m.end()
+        i = self.text.find("<Timer", base, close)
+        j = self.text.find("</Timer>", i, close) if i >= 0 else -1
+        if i < 0 or j < 0:
+            raise WriteError("Heizplan (<Timer>) nicht gefunden.")
+        indent = self._indent(i)
+        head_end = self.text.find(">", i)
+        head = re.sub(r'\bN="\d+"', 'N="%d"' % len(entries), self.text[i:head_end + 1])
+        lines = [head]
+        for frm, to, ix, v in entries:
+            attrs = (' From="%d"' % frm if frm else "") + ' To="%d"' % to + (' Ix="%d"' % ix if ix is not None else "") + ' V="%d"' % v
+            lines.append(indent + "	<Entry" + attrs + "/>")
+        lines.append(indent + "</Timer>")
+        self._replace(i, j + len("</Timer>"), self.nl.join(lines))
+
+    def set_daytimer_entries(self, uuid: str, entries: list) -> None:
+        """Ersetzt die Einträge einer Schaltuhr (DayTimer). Anders als beim Raumregler liegen die <Entry>
+        hier direkt im Objekt (nicht in <Timer>). entries: (von_min|None, bis_min, Ix|None, V). Der
+        Zähler N am Objekt wird angepasst (Config schneidet beim Laden bei N ab)."""
+        open_m = self._c_open(uuid)
+        close = self._c_close(open_m)
+        if close < 0:
+            raise WriteError("Das Objekt hat keinen Inhalt.")
+        base = open_m.end()
+        found = list(re.finditer(r"[ \t]*<Entry\b[^>]*/>\r?\n", self.text[base:close]))
+        indent = self._indent(open_m.start()) + "\t"
+        lines = []
+        for frm, to, ix, v in entries:
+            attrs = (' From="%d"' % frm if frm else "") + ' To="%d"' % to + (' Ix="%d"' % ix if ix is not None else "") + ' V="%d"' % v
+            lines.append(indent + "<Entry" + attrs + "/>" + self.nl)
+        new = "".join(lines)
+        if found:
+            gap = self.text[base + found[0].end():base + found[-1].start()]
+            if any(f.start() != found[i - 1].end() for i, f in enumerate(found) if i):
+                raise WriteError("Unerwarteter Aufbau: Einträge der Schaltuhr sind nicht zusammenhängend.")
+            self._replace(base + found[0].start(), base + found[-1].end(), new)
+        else:
+            io = self.text.find("<IoData", base, close)
+            if io < 0:
+                raise WriteError("Keine Stelle zum Einfügen der Einträge gefunden (kein <IoData>).")
+            self._replace(self._line_start(io), self._line_start(io), new)
+        head_end = open_m.end()
+        tag = self.text[open_m.start():head_end]
+        if re.search(r'\bN="\d+"', tag):
+            tag2 = re.sub(r'\bN="\d+"', 'N="%d"' % len(entries), tag)
+        else:
+            tag2 = re.sub(r'(\sModes=)', ' N="%d"\\1' % len(entries), tag, count=1)
+            if tag2 == tag:
+                raise WriteError("Schaltuhr ohne Zähler N und ohne Modes – nicht unterstützt.")
+        self._replace(open_m.start(), head_end, tag2)
+
     # ---------- Zähler ----------
     def bump(self, counter: str, delta: int) -> None:
         m = re.search(COUNTERS[counter], self.text)
@@ -153,6 +210,27 @@ class ProjectText:
         nl_end = self.text.find("\n", end)
         self._replace(ls, len(self.text) if nl_end < 0 else nl_end + 1, "")
         self.bump("NumO", -n)
+
+    def move_block(self, uuid: str, page_uuid: str) -> None:
+        """Verschiebt einen Baustein samt Unterobjekten (mit unveränderten Kennungen) ans Ende einer anderen
+        Seite. Zähler ändern sich nicht. Verbindungen zu Bausteinen auf der alten Seite müssen vorher
+        gelöst sein (Verbindungen gelten nur innerhalb einer Seite)."""
+        open_m = self._c_open(uuid)
+        close = self._c_close(open_m)
+        end = open_m.end() if close < 0 else close + len("</C>")
+        ls = self._line_start(open_m.start())
+        nl_end = self.text.find("\n", end)
+        stop = len(self.text) if nl_end < 0 else nl_end + 1
+        chunk = self.text[ls:stop]
+        if not chunk.endswith("\n"):
+            chunk += self.nl
+        self._replace(ls, stop, "")
+        pm = self._c_open(page_uuid)
+        pclose = self._c_close(pm)
+        if pclose < 0:
+            raise WriteError("Die Zielseite ist ein leeres Element; Verschieben wird dafür nicht unterstützt.")
+        at = self._line_start(pclose)
+        self._replace(at, at, chunk)
 
     def remove_line_element(self, pattern: str) -> int:
         """Entfernt alle einzeiligen, leeren Elemente (<x .../>), auf die das Muster passt.
@@ -195,16 +273,17 @@ class ProjectText:
         self.text, n = pat.subn(lambda m: m.group(1) + new + m.group(2), self.text)
         return n
 
-    def set_child_attr(self, uuid: str, child: str, name: str, value: str | None) -> None:
-        """Setzt/entfernt ein Attribut am ersten direkten Kindelement 'child' (z. B. IoData) eines Objekts."""
+    def set_child_attr(self, uuid: str, child: str, name: str, value: str | None, index: int = 0) -> None:
+        """Setzt/entfernt ein Attribut am index-ten Element 'child' (z. B. IoData, StateText) innerhalb eines Objekts."""
         open_m = self._c_open(uuid)
         close = self._c_close(open_m)
         if close < 0:
             raise WriteError("Das Objekt hat keine Kindelemente.")
         body = self.text[open_m.end():close]
-        cm = re.search(r"<%s\b[^>]*>" % re.escape(child), body)
-        if not cm:
-            raise WriteError(f"Kindelement {child} nicht gefunden.")
+        found = list(re.finditer(r"<%s\b[^>]*>" % re.escape(child), body))
+        if len(found) <= index:
+            raise WriteError(f"Kindelement {child} Nr. {index + 1} nicht gefunden.")
+        cm = found[index]
         tag = cm.group(0)
         am = re.search(r'\s%s="[^"]*"' % re.escape(name), tag)
         if am:
@@ -226,6 +305,19 @@ class ProjectText:
             raise WriteError(f"Eigenschaft {name} ist an diesem Baustein nicht vorhanden.")
         new = tag[:am.start()] + ("" if value is None else f' {name}="{esc(value)}"') + tag[am.end():]
         self._replace(m.start(), m.end(), new)
+
+    def set_geometry(self, uuid: str, x: int, y: int, x2: int, y2: int) -> None:
+        """Setzt Px, Py, Px2, Py2 eines Bausteins. Config lässt den Wert 0 weg; fehlende Angaben werden
+        deshalb ergänzt (Reihenfolge wie in Config: nach Title, vor Cl)."""
+        m = self._c_open(uuid)
+        tag = m.group(0)
+        for k in ("Px", "Py", "Px2", "Py2"):
+            tag = re.sub(r'\s%s="[^"]*"' % k, "", tag, count=1)
+        geo = "".join(f' {k}="{v}"' for k, v in (("Px", x), ("Py", y), ("Px2", x2), ("Py2", y2)) if v != 0)
+        tm = re.search(r'\sTitle="(?:[^"])*"', tag) or re.search(r'\sU="[^"]*"', tag)
+        if not tm:
+            raise WriteError("Baustein ohne Title und U – Position nicht setzbar.")
+        self._replace(m.start(), m.end(), tag[:tm.end()] + geo + tag[tm.end():])
 
     def add_block_attr(self, uuid: str, name: str, value: str) -> None:
         """Fügt eine Eigenschaft hinzu (direkt nach Type, wie Loxone Config z. B. Desc schreibt)."""

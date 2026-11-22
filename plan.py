@@ -9,7 +9,7 @@ Ops (deutsch, englische Kurzform in Klammern):
   baustein (add)        typ, titel, seite, [x, y], [werte]
   kopie (clone)         von, seite, titel, [von_seite]
   status (state)        seite, titel, quelle, zustaende, [vergleich, standard_text, standard_symbol,
-                        standard_farbe, raum, kategorie, sichtbar]
+                        standard_farbe, raum, kategorie, sichtbar, quelle_ausgang]
   eingang (input)       titel, [analog, min, max, raum, kategorie, sichtbar, einheit, text, name]
   befehl (command)      titel, ein, [aus, unter, quelle, seite, quelle_ausgang]
   rs232                 art ('befehl'|'sensor'), titel, code, [geraet, code_aus, analog]
@@ -26,6 +26,12 @@ Ops (deutsch, englische Kurzform in Klammern):
   seite                 titel, [raum, kategorie]
   mitteilung            titel, text, quelle, seite, [quelle_ausgang, min_ms]
   kategorie_umhaengen   von, nach, [art]    kategorie_loeschen  name, [art]
+  statusstil            baustein, stile [{text|nr, farbe, symbol}], [symbol (Grundsymbol)]
+  raum_kategorie        baustein, [raum], [kategorie]   (einzelnes Objekt umhängen)
+  app                   baustein, [favorit], [reihenfolge 0–10], [symbol]
+  favorit_struktur      art ('raum'|'kategorie'), name, [an=True]
+  heizplan              baustein, komfort {Tag 1=Mo..7=So: [[von, bis], ...]}  (sonst Eco)
+  faerben               [seite]   (Bausteine nach Funktion/Kategorie einfärben, ohne Seite: alle)
 """
 from __future__ import annotations
 
@@ -89,7 +95,7 @@ def run_plan(ed: Editor, steps: list[dict]) -> dict:
         elif op == "status":
             res = ed.add_state(g("seite"), g("titel"), g("quelle"), s["zustaende"], s.get("vergleich", "gleich"),
                                s.get("standard_text", ""), s.get("standard_symbol"), s.get("standard_farbe"), None,
-                               s.get("raum"), s.get("kategorie"), s.get("sichtbar", True))
+                               s.get("raum"), s.get("kategorie"), s.get("sichtbar", True), s.get("quelle_ausgang"))
         elif op == "eingang":
             res = ed.add_virtual_input(g("titel"), s.get("analog", True), s.get("min"), s.get("max"), s.get("raum"),
                                        s.get("kategorie"), s.get("sichtbar", False), s.get("einheit"), s.get("text", False),
@@ -129,6 +135,22 @@ def run_plan(ed: Editor, steps: list[dict]) -> dict:
             src = g("quelle")
             res = ed.add_notification(g("titel"), s["text"], on_page(src, g("seite"), "source"), g("seite"),
                                       s.get("quelle_ausgang"), s.get("min_ms", 5000))
+        elif op == "statusstil":
+            res = ed.set_state_style(g("baustein"), s["stile"], s.get("symbol"), g("seite"))
+        elif op == "raum_kategorie":
+            res = ed.set_room_category(g("baustein"), s.get("raum"), s.get("kategorie"), g("seite"))
+        elif op == "app":
+            res = ed.set_app(g("baustein"), s.get("favorit"), s.get("reihenfolge"), s.get("symbol"), g("seite"))
+        elif op == "favorit_struktur":
+            res = ed.set_structure_favorite(s["art"], s["name"], s.get("an", True))
+        elif op == "heizplan":
+            res = ed.set_heating_schedule(g("baustein"), {int(k): v for k, v in s["komfort"].items()}, g("seite"))
+        elif op == "verschieben":
+            res = ed.move_blocks_to_page(s["bausteine"], s["nach"], s.get("von_seite"))
+        elif op == "schaltuhr":
+            res = ed.set_schedule(g("baustein"), {int(k): v for k, v in s["tage"].items()}, g("seite"))
+        elif op == "faerben":
+            res = ed.color_by_function(g("seite"))
         elif op == "kategorie_umhaengen":
             res = ed.reassign_structure(s.get("art", "kategorie"), s["von"], s["nach"])
         elif op == "kategorie_loeschen":

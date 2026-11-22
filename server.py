@@ -446,6 +446,61 @@ def io_set_display(block: str, visible: bool | None = None, unit: str | None = N
 
 
 @mcp.tool()
+def state_style(block: str, styles: list[dict], base_icon: str | None = None, page: str | None = None) -> dict:
+    """Sets colour and icon of individual states of an existing status block (app display).
+    styles: [{"text": "offen", "farbe": "#ff0054", "symbol": "window-open"}, ...] or {"nr": 1, ...};
+    base_icon = base icon of the tile. Find icons with icon_find."""
+    return _safe(lambda: _editor().set_state_style(block, styles, base_icon, page))
+
+
+@mcp.tool()
+def block_set_room_category(block: str, room: str | None = None, category: str | None = None,
+                            page: str | None = None) -> dict:
+    """Sets room and/or category of a single object (block, input, output)."""
+    return _safe(lambda: _editor().set_room_category(block, room, category, page))
+
+
+@mcp.tool()
+def app_set(block: str, favorite: bool | None = None, rating: int | None = None, icon: str | None = None,
+            page: str | None = None) -> dict:
+    """App properties of an object: favourite, order (rating 0-10, higher = further up), icon.
+    Change the app name of virtual inputs via the description (block_set_params Desc), not the title -
+    Home Assistant addresses them by title."""
+    return _safe(lambda: _editor().set_app(block, favorite, rating, icon, page))
+
+
+@mcp.tool()
+def structure_favorite(kind: str, name: str, on: bool = True) -> dict:
+    """Sets or removes a room (kind='raum') or category (kind='kategorie') as favourite in the app."""
+    return _safe(lambda: _editor().set_structure_favorite(kind, name, on))
+
+
+@mcp.tool()
+def heating_schedule_set(block: str, comfort: dict, page: str | None = None) -> dict:
+    """Sets the heating schedule of an Intelligent Room Controller V2. comfort: {"1": [["15:00","22:00"]], ...}
+    with day 1 = Monday ... 7 = Sunday; all times without an entry are eco. The schedule is replaced completely."""
+    return _safe(lambda: _editor().set_heating_schedule(block, {int(k): v for k, v in comfort.items()}, page))
+
+
+@mcp.tool()
+def schedule_set(block: str, days: dict, page: str | None = None) -> dict:
+    """Sets the times of a schedule (DayTimer) per weekday. days: {"1": [["05:35","05:40"]], "6": []}
+    with day 1 = Monday ... 7 = Sunday; an empty list clears the day. Only the given days are replaced;
+    special days and entries for all days stay. The output is on inside the time window.
+    Note: assumes the usual list of 10 operating modes; check the schedule's modes first."""
+    return _safe(lambda: _editor().set_schedule(block, {int(k): v for k, v in days.items()}, page))
+
+
+@mcp.tool()
+def page_color_by_function(page: str | None = None) -> dict:
+    """Colours blocks and placeholders on program pages by function (category: lighting yellow,
+    shading light blue, heating/climate orange, alarm red, ventilation violet, weather turquoise,
+    access pink, irrigation green). Logic gets the colour of what it controls; colours set by hand
+    stay. Without page: all pages."""
+    return _safe(lambda: _editor().color_by_function(page))
+
+
+@mcp.tool()
 def periphery_remove(block: str) -> dict:
     """Deletes an unused virtual input/output, an empty virtual output, a constant or the weather server. Refuses while the object is still used anywhere; permission entries are removed with it."""
     return _safe(lambda: _editor().remove_periphery(block))
@@ -577,6 +632,71 @@ MULTI_OUT = {"LightController2", "AutoJalousie", "HeatIRoomController2", "Centra
 
 
 @mcp.tool()
+def net_check_outputs() -> dict:
+    """Checks all virtual outputs with a network address (tcp://, http://, udp://): ping and port.
+    Finds devices whose IP has changed (e.g. Yeelight, Shelly). Read-only, sends no commands."""
+    import netcheck
+    def run():
+        rows = netcheck.check_outputs(_current())
+        return {"ausgaenge": rows, "nicht_erreichbar": [r["ausgang"] for r in rows if not r["ok"]]}
+    return _safe(run)
+
+
+def _lan(network: str | None) -> str:
+    import netcheck
+    host = None
+    h = os.environ.get("LOXONE_HOST", "")
+    if h:
+        from urllib.parse import urlsplit
+        host = urlsplit(h if "://" in h else "http://" + h).hostname
+    return network or netcheck.local_network(host)
+
+
+@mcp.tool()
+def yeelight_find(network: str | None = None) -> dict:
+    """Searches the LAN for Yeelight lamps (port 55443, LAN control must be on) and reads their state
+    (on/off, brightness, colour temperature) and MAC address. network e.g. '192.168.1.0/24';
+    default: the Miniserver's network. Read-only."""
+    import netcheck
+    def run():
+        net = _lan(network)
+        return {"netz": net, "lampen": netcheck.yeelight_find(net),
+                "hinweis": "Für Loxone eine feste IP im Router vergeben (DHCP-Reservierung über die MAC)."}
+    return _safe(run)
+
+
+@mcp.tool()
+def net_find_device(mac: str | None = None, network: str | None = None) -> dict:
+    """Finds a device in the LAN by MAC address (e.g. from the type plate) and checks typical control
+    ports (Yeelight 55443, HTTP 80/8081, MQTT). Without mac: list of all devices with IP and MAC. Read-only."""
+    import netcheck
+    def run():
+        net = _lan(network)
+        hits = netcheck.find_device(net, mac)
+        res = {"netz": net, "treffer": hits}
+        if mac and not hits:
+            res["hinweis"] = "Gerät nicht im Netz: Strom, WLAN-Verbindung (App des Herstellers) prüfen."
+        return res
+    return _safe(run)
+
+
+@mcp.tool()
+def mijia_find(network: str | None = None) -> dict:
+    """Searches the LAN for Xiaomi/Mijia/Yeelight devices via miIO (UDP 54321) and shows IP, device ID
+    (hex = ID in Home Assistant/Yeelight) and MAC. Read-only, no token needed. To set up new devices
+    without the app: mijia_setup.py on a computer with Wi-Fi (the user types the password)."""
+    import mijia
+    import netcheck
+    def run():
+        net = _lan(network)
+        arp = netcheck._arp_table()
+        hits = [{"ip": d["ip"], "geraete_id": hex(d["did"]), "mac": arp.get(d["ip"]),
+                 "einrichtungsmodus": bool(d["token"])} for d in mijia.sweep(net)]
+        return {"netz": net, "geraete": hits}
+    return _safe(run)
+
+
+@mcp.tool()
 def live_status() -> dict:
     """Read-only Miniserver status: last program change, CPU, memory, time."""
     return _safe(lambda: Miniserver().status())
@@ -603,6 +723,8 @@ def live_page(page: str, max_values: int = 30) -> dict:
                 try:
                     if t.type in TEXT_INPUTS:
                         cache[t.uuid] = TEXT_INPUT_NOTE
+                    elif t.type in SCALED_ACTORS:
+                        cache[t.uuid] = _actor_value(ms, t)
                     elif t.type in MULTI_OUT:
                         cache[t.uuid] = ms.outputs(t.uuid)
                     else:
@@ -627,9 +749,31 @@ def live_block(block: str, page: str | None = None) -> dict:
         if b.type in TEXT_INPUTS:
             return {"baustein": pr.name(b), "ort": pr.location(b), "wert": TEXT_INPUT_NOTE}
         ms = Miniserver()
-        val = ms.outputs(b.uuid) if b.type in MULTI_OUT else ms.value(b.uuid, output=b.type not in INPUT_TYPES)
+        if b.type in SCALED_ACTORS:
+            val = _actor_value(ms, b)
+        else:
+            val = ms.outputs(b.uuid) if b.type in MULTI_OUT else ms.value(b.uuid, output=b.type not in INPUT_TYPES)
         return {"baustein": pr.name(b), "ort": pr.location(b), "wert": val}
     return _safe(run)
+
+
+# Analoge Tree-Stellantriebe: 'astate' liefert am Miniserver immer 0 %, 'state' den Eingangswert (z. B. 0–10
+# vom Raumregler). Ausgegeben wird der Eingang umgerechnet mit SourceValHigh -> DestValHigh (beobachtet 22.11.).
+SCALED_ACTORS = {"TreeAactor"}
+
+
+def _actor_value(ms, b) -> str:
+    import re as _re
+    raw = ms.value(b.uuid, output=False)
+    m = _re.search(r"-?\d+(?:[.,]\d+)?", str(raw))
+    if not m:
+        return str(raw)
+    x = float(m.group(0).replace(",", "."))
+    p = {k: float(b.elem.get(k) or 0) for k in ("SourceValLow", "SourceValHigh", "DestValLow", "DestValHigh")}
+    if p["SourceValHigh"] == p["SourceValLow"]:
+        return str(raw)
+    y = p["DestValLow"] + (x - p["SourceValLow"]) * (p["DestValHigh"] - p["DestValLow"]) / (p["SourceValHigh"] - p["SourceValLow"])
+    return f"{round(y)} % (Eingang {x:g})"
 
 
 # Bei virtuellen Texteingängen SETZT /jdev/sps/io/<name>/state (bzw. astate/all) den Text auf

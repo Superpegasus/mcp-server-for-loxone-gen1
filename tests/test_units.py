@@ -56,6 +56,41 @@ def test_parser_digit_attribute(tmp=Path(__file__).with_name("_tmp.Loxone")):
         tmp.unlink()
 
 
+def test_netcheck_parse_address():
+    import netcheck
+    assert netcheck.parse_address("tcp://192.168.1.5:55443") == ("tcp", "192.168.1.5", 55443)
+    assert netcheck.parse_address("http://host") == ("http", "host", 80)
+    assert netcheck.parse_address("") is None and netcheck.parse_address("keine-url") is None
+
+
+def test_mijia_packet_roundtrip():
+    import mijia
+    token = bytes.fromhex("00112233445566778899aabbccddeeff")
+    payload = b'{"id":1,"method":"miIO.info","params":[]}'
+    pkt = mijia.build(token, 0x1234, 99, payload)
+    res = mijia.parse(pkt, token)
+    assert res["did"] == 0x1234 and res["stamp"] == 99 and res["daten"]["method"] == "miIO.info"
+    hello_reply = bytes.fromhex("21310020" + "00000000" + "00001234" + "00000063") + token
+    assert mijia.parse(hello_reply)["token"] == token.hex()
+
+
+def test_daytimer_entries_and_permission_refs():
+    from writer import ProjectText
+    uid = "a-1-ffff112233445566"
+    nl = "\n"
+    raw = nl.join([
+        "<ControlList>", '\t<C Type="Document" U="d-1" NumO="3">',
+        '\t\t<C Type="DayTimer" U="' + uid + '" Title="Uhr" Nio="1" UserModes="3" N="2" Modes="x">',
+        '\t\t\t<Entry From="450" To="480" Ix="2" V="1"/>', '\t\t\t<Entry From="335" To="340" Ix="3" V="1"/>',
+        '\t\t\t<IoData Visu="true"/>', "\t\t</C>",
+        '\t\t<PH NUM="1">', '\t\t\t<PRM REF="' + uid + '" ACT="3"/>', "\t\t</PH>",
+        "\t</C>", "</ControlList>", ""]).encode()
+    pt = ProjectText(raw)
+    pt.set_daytimer_entries(uid, [(450, 480, 2, 1), (None, 100, 3, 1), (360, 370, 4, 1)])
+    assert 'N="3"' in pt.text and pt.text.count("<Entry") == 3 and '<Entry To="100" Ix="3" V="1"/>' in pt.text
+    assert pt.remove_permission_refs(uid) == 1 and 'NUM="0"' in pt.text
+
+
 if __name__ == "__main__":
     tests = [f for n, f in sorted(globals().items()) if n.startswith("test_")]
     for t in tests:

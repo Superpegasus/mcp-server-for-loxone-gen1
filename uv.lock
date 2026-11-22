@@ -299,8 +299,8 @@ wheels = [
 ]
 
 [[package]]
-name = "loxone-projekt-mcp"
-version = "0.1.0"
+name = "loxone-mcp-gen1"
+version = "0.9.1"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp" },

@@ -196,6 +196,10 @@ class Editor:
                 if not val:
                     raise ProjectError("Der Titel darf nicht leer sein.")
                 steps.append(lambda v=val: self.pt.set_block_attr(b.uuid, "Title", v))
+                # Platzhalter auf Programmseiten mit gleichem Titel mitnehmen (wie Loxone Config)
+                for r in pr.blocks.values():
+                    if pr.target(r) is b and r.title == b.title:
+                        steps.append(lambda u=r.uuid, v=val: self.pt.set_block_attr(u, "Title", v))
                 done.append(f"Titel: {b.title} -> {val}")
             elif name in b.elem.attrib and name not in PROTECTED_ATTRS:
                 steps.append(lambda n=name, v=val: self.pt.set_block_attr(b.uuid, n, v))
@@ -321,12 +325,15 @@ class Editor:
         Anzeigeeinheit (Display Unit, z. B. '<v.1>°' oder '<v>%')."""
         pr = self.project
         b = pr.logical(pr.resolve(spec, None))
-        if b.type not in ("VirtualIn", "VirtualTextIn", "VirtualHttpInCmd", "VirtualUdpInCmd", "Memory", "Constant"):
-            raise ProjectError(f"'{pr.name(b)}': Anzeige lässt sich nur für Eingänge, Merker und Konstanten setzen.")
+        hide_only = visible is False and unit is None and b.elem.find("IoData") is not None
+        if not hide_only and b.type not in ("VirtualIn", "VirtualTextIn", "VirtualHttpInCmd", "VirtualUdpInCmd", "Memory", "Constant", "StateV"):
+            raise ProjectError(f"'{pr.name(b)}': Anzeige lässt sich nur für Eingänge, Merker, Konstanten und Statusanzeigen setzen.")
+        if b.type == "StateV" and not hide_only and (b.elem.find("Display") is None or visible is not None):
+            raise ProjectError(f"'{pr.name(b)}': bei Statusanzeigen lässt sich nur die Einheit ändern.")
         io = b.elem.find("IoData")
         disp = b.elem.find("Display")
         done = []
-        is_text = b.type == "VirtualTextIn"  # Text: nur Sichtbarkeit/Einheit, kein Display Type
+        is_text = b.type in ("VirtualTextIn", "StateV")  # nur Sichtbarkeit/Einheit, kein Display Type
 
         def run():
             if visible is not None:
@@ -363,6 +370,311 @@ class Editor:
             [f"{'sichtbar' if visible else 'ausgeblendet'}"] * (visible is not None) + [f"Einheit {unit}"] * (unit is not None)), run)
         return {"baustein": pr.name(b), "geaendert": done}
 
+    # ---------- Farben ----------
+    # Blockfarben (Cl, "R,G,B") je Kategorie. Gelb/Hellblau/Orange/Rot entsprechen dem Schema,
+    # das im Projekt schon von Hand verwendet wird.
+    FUNCTION_COLORS = {
+        "Beleuchtung": "255,230,71", "Lichtsensor": "255,230,71", "Bewegungssensor": "255,230,71",
+        "Beschattung": "115,224,255",
+        "Heizung": "255,125,48", "Klima": "255,125,48",
+        "Alarm": "255,0,84",
+        "Lüftung": "170,140,255",
+        "Wetter": "0,210,190",
+        "Zutritt": "255,150,220",
+        "Bewässerung": "70,190,90",
+    }
+    DEFAULT_COLORS = {"141,255,112", "0,0,0"}   # Standard für Logik-Bausteine bzw. Platzhalter
+    NEUTRAL_COLORS = DEFAULT_COLORS | {"238,238,238"}
+
+    def color_by_function(self, page: str | None = None, max_depth: int = 6) -> dict:
+        """Färbt Bausteine und Platzhalter auf Programmseiten nach ihrer Funktion (Kategorie). Von Hand
+        gesetzte Farben bleiben. Logik ohne eigene Kategorie bekommt die Farbe dessen, was sie
+        steuert (nächstes gefärbtes Ziel), sonst die ihrer Quellen."""
+        pr = self.project
+        if page:
+            page_ids = {pr.find_page(page).uuid}
+        else:
+            page_ids = {b.page.uuid for b in pr.blocks.values() if b.page is not None}
+        blocks = [b for b in pr.blocks.values() if b.page is not None and b.page.uuid in page_ids
+                  and b.uuid != b.page.uuid and b.elem.get("Cl") is not None]
+
+        def own_cat(b: Block) -> str | None:
+            for cand in (b, pr.target(b)):
+                if cand is None:
+                    continue
+                io = cand.elem.find("IoData")
+                name = pr.categories.get(io.get("Cr") if io is not None else "")
+                if name and name in self.FUNCTION_COLORS:
+                    return name
+            return None
+
+        seed: dict[str, str] = {}
+        for b in blocks:
+            cl = b.elem.get("Cl")
+            if cl not in self.NEUTRAL_COLORS:
+                seed[b.uuid] = cl           # Farbe von Hand gesetzt
+            elif pr.logical(b).type in ("Mode", "CalendarEntry"):
+                continue                    # Betriebsmodi gehören zu keiner Funktion
+            else:
+                c = own_cat(b)
+                if c:
+                    seed[b.uuid] = self.FUNCTION_COLORS[c]
+
+        def search(start: Block, edges, nxt) -> str | None:
+            frontier, seen = [start], {start.uuid}
+            for _ in range(max_depth):
+                votes = Counter()
+                new = []
+                for b in frontier:
+                    for e in edges.get(b.uuid, []):
+                        n = nxt(e)
+                        if n.uuid in seen or n.page is None or n.page.uuid != start.page.uuid:
+                            continue
+                        seen.add(n.uuid)
+                        if n.uuid in seed:
+                            votes[seed[n.uuid]] += 1
+                        else:
+                            new.append(n)
+                if votes:
+                    return votes.most_common(1)[0][0]
+                frontier = new
+                if not frontier:
+                    break
+            return None
+
+        alarm = self.FUNCTION_COLORS["Alarm"]
+        message_types = {"VirtualOutCmd", "Notification", "OutputRefLM"}
+        changes: dict[str, str] = {}
+        for b in blocks:
+            if b.elem.get("Cl") not in self.DEFAULT_COLORS:
+                continue
+            fwd = search(b, pr.out_edges, lambda e: e.dst)
+            back = search(b, pr.in_edges, lambda e: e.src)
+            if (pr.logical(b).type in message_types) or b.type in message_types:
+                col = back or seed.get(b.uuid) or fwd       # Meldungen: Farbe des Auslösers
+            elif back == alarm and b.type in ("State", "StateV"):
+                col = alarm                                 # Anzeige von Brand-/Wassermeldern
+            elif b.uuid in seed:
+                col = seed[b.uuid]
+            elif alarm in (fwd, back):
+                col = alarm                                 # Sicherheit immer sichtbar rot
+            else:
+                col = fwd or back
+            if col and col != b.elem.get("Cl"):
+                changes[b.uuid] = col
+        if not changes:
+            return {"gefaerbt": 0, "hinweis": "Nichts zu färben."}
+        names = {}
+        for k, v in self.FUNCTION_COLORS.items():
+            names.setdefault(v, k)
+        stat = Counter(names.get(c, f"Farbe {c}") for c in changes.values())
+        self._apply(f"Bausteine nach Funktion gefärbt: {len(changes)} ("
+                    + ", ".join(f"{k} {v}" for k, v in stat.most_common()) + ")",
+                    lambda: [self.pt.set_block_attr(u, "Cl", c) for u, c in changes.items()])
+        return {"gefaerbt": len(changes), "je_funktion": dict(stat), "seiten": len(page_ids),
+                "farben": dict(self.FUNCTION_COLORS)}
+
+    def set_heating_schedule(self, block: str, comfort: dict, page: str | None = None) -> dict:
+        """Heizplan eines Raumreglers (Intelligenter Raumregler V2) setzen. comfort: {Tag: [(von, bis), ...]}
+        mit Tag 1 = Montag … 7 = Sonntag und Zeiten als 'HH:MM' oder Minuten; alles andere ist Eco."""
+        pr = self.project
+        b = pr.logical(pr.resolve(block, page))
+        if b.type != "HeatIRoomController2" or b.elem.find("Timer") is None:
+            raise ProjectError(f"'{pr.name(b)}' ist kein Raumregler mit Heizplan.")
+
+        def mins(x):
+            if isinstance(x, int):
+                return x
+            h, m = str(x).split(":")
+            return int(h) * 60 + int(m)
+        entries = [(None, 1440, None, 2)]                       # Standard: Eco
+        for day in sorted(int(d) for d in comfort):
+            if not 1 <= day <= 7:
+                raise ProjectError("Tage 1 (Mo) bis 7 (So).")
+            for frm, to in comfort[day] if day in comfort else comfort[str(day)]:
+                f, t_ = mins(frm), mins(to)
+                if not 0 <= f < t_ <= 1440:
+                    raise ProjectError(f"Ungültiges Zeitfenster {frm}–{to}.")
+                entries.append((f or None, t_, day, 1))
+        old = b.elem.find("Timer")
+        n = len(old.findall("Entry"))
+        self._apply(f"Heizplan {pr.name(b)}: {len(entries)} Einträge (vorher {n})",
+                    lambda: self.pt.set_timer_entries(b.uuid, entries))
+        return {"baustein": pr.name(b), "eintraege": len(entries)}
+
+    def move_blocks_to_page(self, blocks: list[str], page: str, from_page: str | None = None) -> dict:
+        """Verschiebt Bausteine (und Platzhalter) auf eine andere Programmseite. Erlaubt nur, wenn sie
+        keine Verbindung zu Bausteinen behalten, die auf der alten Seite bleiben (ganze Gruppen)."""
+        pr = self.project
+        target = pr.find_page(page)
+        items = [pr.resolve(b, from_page) for b in blocks]
+        if any(b.page is None or b.parent is not b.page for b in items):
+            raise ProjectError("Nur Bausteine, die direkt auf einer Programmseite liegen, lassen sich verschieben.")
+        moving = {b.uuid for b in items}
+        for e in pr.edges:
+            if (e.src.uuid in moving) != (e.dst.uuid in moving) and e.src.page is not None and e.src.page is e.dst.page:
+                raise ProjectError(f"'{pr.name(e.src)}' und '{pr.name(e.dst)}' sind verbunden, aber nur einer soll die Seite wechseln. Nur ganze Gruppen verschieben.")
+        names = [pr.name(b) for b in items]
+        origin = sorted({b.page.title for b in items})
+        self._apply(f"Verschoben auf Seite {page}: {len(items)} Bausteine (von {', '.join(origin)})",
+                    lambda: [self.pt.move_block(b.uuid, target.uuid) for b in items])
+        return {"verschoben": len(items), "nach": page, "von": origin, "bausteine": names[:12]}
+
+    def set_schedule(self, block: str, days: dict, page: str | None = None) -> dict:
+        """Zeiten einer Schaltuhr (DayTimer) je Wochentag setzen. days: {Tag: [(von, bis), ...]} mit
+        Tag 1 = Montag … 7 = Sonntag und Zeiten 'HH:MM' oder Minuten; eine leere Liste löscht den Tag.
+        Nur die genannten Tage werden ersetzt. Eintrag Ix = 2 + Tag (3–9 = Mo–So); Einträge ohne Ix und
+        Ix 1/2 (Sondertage) bleiben unverändert. Der Ausgang ist während der Zeit an (V = 1)."""
+        pr = self.project
+        b = pr.logical(pr.resolve(block, page))
+        if b.type != "DayTimer":
+            raise ProjectError(f"'{pr.name(b)}' ist keine Schaltuhr (DayTimer).")
+
+        def mins(x):
+            if isinstance(x, int):
+                return x
+            h, m = str(x).split(":")
+            return int(h) * 60 + int(m)
+        new: dict[int, list] = {}
+        for d, spans in days.items():
+            d = int(d)
+            if not 1 <= d <= 7:
+                raise ProjectError("Tage 1 (Mo) bis 7 (So).")
+            rows = []
+            for frm, to in spans:
+                f, t_ = mins(frm), mins(to)
+                if not 0 <= f < t_ <= 1440:
+                    raise ProjectError(f"Ungültiges Zeitfenster {frm}–{to}.")
+                rows.append((f or None, t_, 2 + d, 1))
+            new[2 + d] = rows
+        keep, old_n = [], 0
+        for e in b.elem.findall("Entry"):
+            old_n += 1
+            ix = int(e.get("Ix")) if e.get("Ix") is not None else None
+            if ix in new:
+                continue
+            keep.append((int(e.get("From") or 0) or None, int(e.get("To")), ix, int(e.get("V", "1"))))
+        entries = keep + [r for rows in new.values() for r in rows]
+        entries.sort(key=lambda r: (-1 if r[2] is None else r[2], r[0] or 0))
+        self._apply(f"Schaltuhr {pr.name(b)}: {len(entries)} Einträge (vorher {old_n})",
+                    lambda: self.pt.set_daytimer_entries(b.uuid, entries))
+        return {"baustein": pr.name(b), "eintraege": len(entries), "vorher": old_n}
+
+    def set_room_category(self, block: str, room: str | None = None, category: str | None = None,
+                          page: str | None = None) -> dict:
+        """Raum und/oder Kategorie eines einzelnen Objekts setzen (wie in Config unter Eigenschaften)."""
+        pr = self.project
+        b = pr.logical(pr.resolve(block, page))
+        if b.elem.find("IoData") is None:
+            raise ProjectError(f"'{pr.name(b)}' hat keine Raum-/Kategorie-Angabe (kein IoData).")
+
+        def lookup(table: dict, name: str, what: str) -> str:
+            hits = [u for u, n in table.items() if n.lower() == name.lower()]
+            if len(hits) != 1:
+                raise ProjectError(f"{what} '{name}' nicht gefunden. Vorhanden: {', '.join(sorted(set(table.values())))}")
+            return hits[0]
+        ops, done = [], []
+        if category:
+            ops.append(("Cr", lookup(pr.categories, category, "Kategorie")))
+            done.append(f"Kategorie {pr.category(b)} -> {category}")
+        if room:
+            ops.append(("Pr", lookup(pr.places, room, "Raum")))
+            done.append(f"Raum {pr.room(b)} -> {room}")
+        if not ops:
+            raise ProjectError("room oder category angeben.")
+        self._apply(f"{pr.name(b)}: " + ", ".join(done),
+                    lambda: [self.pt.set_child_attr(b.uuid, "IoData", k, v) for k, v in ops])
+        return {"baustein": pr.name(b), "geaendert": done}
+
+    def set_app(self, block: str, favorite: bool | None = None, rating: int | None = None,
+                icon: str | None = None, page: str | None = None) -> dict:
+        """App-Eigenschaften eines Objekts: Favorit, Reihenfolge (Rating, höher = weiter oben) und Symbol."""
+        import icons
+        pr = self.project
+        b = pr.logical(pr.resolve(block, page))
+        if b.elem.find("IoData") is None:
+            raise ProjectError(f"'{pr.name(b)}' erscheint nicht in der App (kein IoData).")
+        ops, done = [], []
+        if favorite is not None:
+            ops.append(("UseInFav", "true" if favorite else None))
+            done.append("Favorit" if favorite else "kein Favorit")
+        if rating is not None:
+            if not 0 <= int(rating) <= 10:
+                raise ProjectError("Reihenfolge (Rating) 0–10.")
+            ops.append(("Rating", str(int(rating)) if int(rating) else None))
+            done.append(f"Reihenfolge {int(rating)}")
+        if icon:
+            ops.append(("IconV", icons.resolve(icon)))
+            done.append(f"Symbol {icon}")
+        if not ops:
+            raise ProjectError("favorite, rating oder icon angeben.")
+        self._apply(f"App {pr.name(b)}: " + ", ".join(done),
+                    lambda: [self.pt.set_child_attr(b.uuid, "IoData", k, v) for k, v in ops])
+        return {"baustein": pr.name(b), "geaendert": done}
+
+    def set_structure_favorite(self, kind: str, name: str, on: bool = True) -> dict:
+        """Raum ('raum') oder Kategorie ('kategorie') als Favorit in der App markieren oder entfernen."""
+        pr = self.project
+        table = pr.places if kind == "raum" else pr.categories if kind == "kategorie" else None
+        if table is None:
+            raise ProjectError("kind muss 'raum' oder 'kategorie' sein.")
+        hits = [u for u, n in table.items() if n.lower() == name.lower()]
+        if len(hits) != 1:
+            raise ProjectError(f"{kind} '{name}' nicht gefunden.")
+        el = next(e for e in pr.root.iter("C") if e.get("U") == hits[0])
+        has = el.get("UseFav") is not None
+
+        def run():
+            if on and has:
+                self.pt.set_block_attr(hits[0], "UseFav", "true")
+            elif on:
+                self.pt.add_block_attr(hits[0], "UseFav", "true")
+            elif has:
+                self.pt.set_block_attr(hits[0], "UseFav", None)
+        self._apply(f"{kind.capitalize()} {name}: {'Favorit' if on else 'kein Favorit'}", run)
+        return {kind: name, "favorit": on}
+
+    def set_state_style(self, block: str, styles: list[dict], base_icon: str | None = None,
+                        page: str | None = None) -> dict:
+        """Farbe und Symbol einzelner Zustände eines vorhandenen Status-Bausteins (State) setzen.
+        styles: [{"text": "offen", "farbe": "#ff0054", "symbol": "window-open"}, ...]; statt 'text'
+        geht 'nr' (1 = erster Zustand; der letzte ist der Standard-Zustand)."""
+        import icons
+        pr = self.project
+        b = pr.logical(pr.resolve(block, page))
+        if b.type != "State" or b.elem.find("StateTexts") is None:
+            raise ProjectError(f"'{pr.name(b)}' ist kein Status-Baustein mit Zuständen.")
+        rows = b.elem.find("StateTexts").findall("StateText")
+        ops, done = [], []
+        for s in styles:
+            if "nr" in s:
+                i = int(s["nr"]) - 1
+                if not 0 <= i < len(rows):
+                    raise ProjectError(f"Zustand Nr. {s['nr']} gibt es nicht (1–{len(rows)}).")
+            else:
+                hits = [i for i, r in enumerate(rows) if (r.get("Text") or "") == str(s.get("text", ""))]
+                if len(hits) != 1:
+                    raise ProjectError(f"Zustand '{s.get('text')}' nicht eindeutig gefunden. Vorhanden: "
+                                       + ", ".join(repr(r.get("Text")) for r in rows))
+                i = hits[0]
+            if s.get("farbe"):
+                ops.append((i, "IcC", str(icons.color(s["farbe"]))))
+            if s.get("symbol"):
+                ops.append((i, "Icon", icons.resolve(s["symbol"])))
+            done.append(f"{rows[i].get('Text') or '(Standard)'}: "
+                        + ", ".join(x for x in (s.get("farbe"), s.get("symbol")) if x))
+        icon_v = icons.resolve(base_icon) if base_icon else None
+        if not ops and not icon_v:
+            raise ProjectError("Nichts zu ändern: farbe oder symbol angeben.")
+
+        def run():
+            for i, k, v in ops:
+                self.pt.set_child_attr(b.uuid, "StateText", k, v, i)
+            if icon_v:
+                self.pt.set_child_attr(b.uuid, "IoData", "IconV", icon_v)
+        self._apply(f"Status-Stil {pr.name(b)}: " + "; ".join(done), run)
+        return {"baustein": pr.name(b), "geaendert": done}
+
     # ---------- Statistik ----------
     # StatsType wie in Loxone Config: 1 = bei jeder Änderung, 6/7/9/11 = Mittelwert-/Intervallarten
     STATS_TYPES = {"aus": None, "jede_aenderung": "1"}
@@ -393,16 +705,17 @@ class Editor:
         """Verschiebt einen Baustein oder Platzhalter auf einer Seite (Raster 96, innerhalb des Blattes)."""
         pr = self.project
         b = pr.resolve(block, page)
-        if b.page is None or b.elem.get("Px") is None:
+        if b.page is None:
             raise ProjectError(f"'{pr.name(b)}' liegt auf keiner Programmseite.")
         w, h = _px(b, "Px2") - _px(b, "Px"), _px(b, "Py2") - _px(b, "Py")
+        if w <= 0 or h <= 0:   # nie platziert (Config lässt 0-Werte weg): Standardgröße eines Platzhalters
+            w, h = 2112, 192
         x, y = _snap(x), _snap(y)
         if x < 0 or y < 0 or x + w > self.SHEET_W or y + h > self.SHEET_H:
             raise ProjectError(f"Position liegt außerhalb des Blattes (max. {self.SHEET_W - w}, {self.SHEET_H - h}).")
 
         def run():
-            for k, v in (("Px", x), ("Py", y), ("Px2", x + w), ("Py2", y + h)):
-                self.pt.set_block_attr(b.uuid, k, str(v))
+            self.pt.set_geometry(b.uuid, x, y, x + w, y + h)
         self._apply(f"Verschoben: {pr.name(b)} -> {x},{y}", run)
         return {"baustein": pr.name(b), "seite": b.page.title, "position": {"x": x, "y": y}}
 
@@ -548,12 +861,16 @@ class Editor:
 
     # ---------- mehrere Schritte als eine Einheit ----------
     def _atomic(self, fn):
-        start = len(self.log)
+        # Stand komplett merken: der Rückgängig-Speicher ist begrenzt (MAX_UNDO), lange Baupläne
+        # ließen sich sonst nicht vollständig zurückrollen und die eigentliche Fehlermeldung ginge verloren.
+        text, log, stack = self.pt.text, list(self.log), list(self.undo_stack)
         try:
             return fn()
         except Exception:
-            while len(self.log) > start:
-                self.undo()
+            self.pt.text = text
+            self.project = Project(self.source, self.pt.data())
+            self.log[:] = log
+            self.undo_stack[:] = stack
             raise
 
     def _clone_periphery(self, example: Block, attrs: dict, label: str) -> Block:
@@ -603,7 +920,7 @@ class Editor:
     def add_state(self, page: str, title: str, source: str, states: list[dict], compare: str = "gleich",
                   default_text: str = "", default_icon: str | None = None, default_color: str | None = None,
                   base_icon: str | None = None, room: str | None = None, category: str | None = None,
-                  visu: bool = True) -> dict:
+                  visu: bool = True, source_key: str | None = None) -> dict:
         """Status-Baustein (Typ State) mit eigenem Text, Symbol und Farbe je Zustand.
         states: [{"wert": 1, "text": "Sonnig", "symbol": "sun", "farbe": "#ffc800"}, ...]
         compare 'gleich' = I1 gleich Wert; 'ab' = I1 >= Wert (Zustände von oben nach unten geprüft,
@@ -632,7 +949,7 @@ class Editor:
                  "Input0": "1", "CondV0": str(v), "CondT0": str(v)}
             if compare == "ab":
                 a = {**{k: a[k] for k in ("Valid", "ValidV", "Text", "TextV", "Icon", "IcC", "Input0")},
-                     "Cond0": "1", "CondV0": str(v), "CondT0": str(v)}
+                     "Cond0": "2", "CondV0": str(v), "CondT0": str(v)}  # 2 = ">=" (1 wäre ">")
             rows.append(a)
         rows.append({"Valid": "true", "ValidV": "true", "Text": default_text, "TextV": "0",
                      "Icon": icons.resolve(default_icon), "IcC": str(icons.color(default_color, "#aaaaaa"))})
@@ -679,7 +996,7 @@ class Editor:
             s = self._signal_on_page(src, pg)
             # Logikbausteine mit mehreren Ausgängen (z. B. Formel: AQ/TQ): analogen Ausgang nehmen
             on_page = src.page is not None and src.page.uuid == pg.uuid
-            key = "AQ" if on_page and src.connector("AQ") is not None else None
+            key = source_key or ("AQ" if on_page and src.connector("AQ") is not None else None)
             self.connect(s, key, "#" + self.project.short(self.project.blocks[buuid]), "I1", pg.title)
         self._atomic(run)
         return {"angelegt": self.project.name(self.project.blocks[buuid]), "seite": pg.title,
@@ -758,7 +1075,7 @@ class Editor:
 
     # ---------- Peripherie löschen ----------
     REMOVABLE_PERIPHERY = {"WeatherServer", "VirtualIn", "VirtualTextIn", "VirtualOutCmd", "VirtualUdpInCmd",
-                           "VirtualHttpInCmd", "VirtualHttpIn", "Constant", "VirtualOut"}
+                           "VirtualHttpInCmd", "VirtualHttpIn", "Constant", "VirtualOut", "Lox232sensor", "Lox232actor"}
 
     def remove_periphery(self, spec: str) -> dict:
         """Löscht ein Peripherie-Objekt (virtueller Ein-/Ausgang, Konstante, Wetterserver), wenn es
@@ -1105,6 +1422,7 @@ class Editor:
         def run():
             for dst, src in cuts:
                 self.pt.remove_in(dst, src)
+            self.pt.remove_permission_refs(b.uuid)   # Benutzerrechte auf das Objekt mit entfernen
             self.pt.remove_block(b.uuid)
 
         self._apply(f"Gelöscht: {name} von Seite {pg} ({len(cuts)} Verbindungen gelöst)", run)

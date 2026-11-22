@@ -20,6 +20,10 @@ Most Loxone MCP servers can only *control* devices (switch lights, read states).
 | Build plan | `build_plan`: many steps in one call, **all or nothing**, names via `als`/`$name`, missing placeholders created automatically |
 | Status with icons | `state_add` (text, icon and colour per state), `icon_find` (searches the Loxone icon library) |
 | Peripherals | `io_add_virtual_input` (incl. text inputs), `io_set_display`, `io_set_statistics`, `io_add_command` (e.g. Home Assistant webhook), `rs232_add`, `periphery_remove`, `notification_add` (Loxone app notification) |
+| App display | `state_style` (colour/icon per state of an existing status block), `app_set` (favourite, order, icon), `structure_favorite`, `block_set_room_category`, `page_color_by_function` |
+| Schedules | `heating_schedule_set` (room controller V2), `schedule_set` (DayTimer per weekday) |
+| Layout | `layout2.py` (layered layout: inputs left, logic in columns, outputs right; feedback loops ignored), `layout_opt.py` (local search so connections do not run across blocks), `layout_all.py` (command line) |
+| Network (read only) | `net_check_outputs` (ping/port of all virtual outputs with an address), `net_find_device` (by MAC), `yeelight_find`, `mijia_find` (miIO discovery) |
 | Rooms/categories | `structure_list`, `structure_remove`, `structure_reassign` |
 | Working copy | `project_changes`, `project_validate`, `project_lint`, `project_undo`, `project_discard`, `project_save` (always a new file, never overwrites) |
 | Miniserver (read only) | `live_status`, `live_page`, `live_block`, `live_history`, `backup_miniserver` (FTP download of the running program into a local Git repo, with a plain-text diff), `verify_load` (after loading: waits for the Miniserver, backs up, compares with the expected file) |
@@ -84,6 +88,10 @@ Then, in the assistant: run `catalog_learn` once (it learns the block types from
 - System variables are fed via an output placeholder of the system variable, not via the `source` attribute.
 - Pages have no size in the file; the visible sheet is about 23,400 × 16,300 units. New blocks are placed inside it.
 - After loading, a Gen 1 Miniserver is unreachable (HTTP 503) for about a minute.
+- Status thresholds: `Cond0` 1 means "greater than", 2 "greater or equal" – use 2 for thresholds, otherwise a value exactly on the threshold falls through.
+- DayTimer entries sit directly in the object; `Ix` is the position in the timer's *mode list*, not a fixed weekday. Config keeps only as many entries as the timer has modes. Room controller schedules live in `<Timer N=…>` and `N` must equal the number of entries.
+- Config drops `Def` values on connected inputs and zero geometry values when loading; the comparison tools ignore both.
+- Analogue Tree valve actuators report 0 % via `astate`; `state` returns the input value, which `live_block` scales with SourceValHigh → DestValHigh.
 - Zehnder ComfoAir (RS232) sends a data byte `0x07` as `07 07`, which shifts all following bytes for fixed-position RS232 sensors.
 
 ## What it deliberately does *not* do
@@ -104,5 +112,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Changelog
 
+- **0.9.1** – App display tools (`state_style`, `app_set`, `structure_favorite`, `block_set_room_category`, `page_color_by_function`); schedules (`heating_schedule_set`, `schedule_set`, build-plan ops `heizplan`, `schaltuhr`); build-plan op `verschieben` (move whole independent groups to another page); layered layout and crossing optimizer (`layout2.py`, `layout_opt.py`, `layout_all.py`); read-only network tools (`net_check_outputs`, `net_find_device`, `yeelight_find`, `mijia_find`); `block_set_position` also sets missing geometry; `block_remove` removes user-permission references; live values of Tree valve actuators scaled correctly; `verify_load` ignores default values on connected inputs; unit test for DayTimer entries and permission references.
 - **0.9.0** – `page_add`, `notification_add`, English tool descriptions, unit tests, recycle fallback outside Windows, `build_plan` ops `trennen`, `seite`, `mitteilung`, `kategorie_umhaengen`, `kategorie_loeschen`; empty virtual outputs can be removed; parser accepts attributes starting with a digit (newer Config files).
 - **0.8.0** – first public release.

@@ -23,7 +23,7 @@ from loxproject import Project, ProjectError
 from recipes import RECIPES, Recipes
 from sync import autosave_report, sync_report
 
-mcp = MCPServer("loxone-mcp-gen1")
+mcp = MCPServer("mcp-server-for-loxone-gen1")
 
 _project: Project | None = None
 _catalog: Catalog | None = None

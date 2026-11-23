@@ -1,6 +1,6 @@
-# loxone-mcp-gen1 · v0.9
+# MCP server for Loxone Gen 1 · v0.9
 
-**Loxone MCP for Miniserver Gen 1**
+**Unofficial MCP server for the Loxone Miniserver Gen 1** (repository: `mcp-server-for-loxone-gen1`, formerly `loxone-mcp-gen1`)
 
 An MCP server that lets an AI assistant (e.g. Claude) **read, analyze and safely edit copies of Loxone Config project files** (`.Loxone`) — including on a **Miniserver Gen 1**, which the official Loxone MCP does not support.
 
@@ -45,9 +45,9 @@ Add to your MCP client configuration (example for Claude Desktop):
 ```json
 {
   "mcpServers": {
-    "loxone-mcp-gen1": {
+    "mcp-server-for-loxone-gen1": {
       "command": "uv",
-      "args": ["run", "--directory", "C:\\path\\to\\loxone-mcp-gen1", "server.py"],
+      "args": ["run", "--directory", "C:\\path\\to\\mcp-server-for-loxone-gen1", "server.py"],
       "env": {
         "LOXONE_PROJECTS_DIR": "C:\\Users\\<you>\\Documents\\Loxone\\Loxone Config\\Projects",
         "LOXONE_HOST": "http://<miniserver-ip>",
@@ -99,6 +99,16 @@ Then, in the assistant: run `catalog_learn` once (it learns the block types from
 - It never uploads to the Miniserver and never overwrites your files. Loading stays in Loxone Config.
 - It sends no switching commands. Live access is a fixed whitelist of read-only requests (plus an FTP download for backups).
 
+## Safety and liability
+
+- **Use it only on your own installation**, or one you are authorized to change.
+- **Every change is a proposal.** Open each new file in Loxone Config, review it, and load it yourself. Do not load files you have not checked.
+- **Heating, frost protection, water, smoke, alarm and access functions are safety-relevant.** Do not rely on this tool alone for them; keep independent safeguards (thermostat limits, frost protection in the boiler, hard-wired smoke detectors, a qualified installer). Test after every change.
+- Keep a backup of the running program (`backup_miniserver`) before loading a new version.
+- Use a dedicated Miniserver user with minimal rights for the read-only live access. Never commit credentials; `settings.json`, `catalog.json` and project files are git-ignored, and backups are stored outside the repository.
+- The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)). You are responsible for what you load into your Miniserver.
+- This project contains no Loxone software, icons, documentation or project files. Icons and block templates are read or learned locally from your own Loxone Config installation and projects.
+
 ## Tests
 
 ```bash
@@ -112,6 +122,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Changelog
 
+- **0.9.2** – Renamed to `mcp-server-for-loxone-gen1` (MCP server name and package name; update the key in your MCP client config if you like). New section "Safety and liability".
 - **0.9.1** – App display tools (`state_style`, `app_set`, `structure_favorite`, `block_set_room_category`, `page_color_by_function`); schedules (`heating_schedule_set`, `schedule_set`, build-plan ops `heizplan`, `schaltuhr`); build-plan op `verschieben` (move whole independent groups to another page); layered layout and crossing optimizer (`layout2.py`, `layout_opt.py`, `layout_all.py`); read-only network tools (`net_check_outputs`, `net_find_device`, `yeelight_find`, `mijia_find`); `block_set_position` also sets missing geometry; `block_remove` removes user-permission references; live values of Tree valve actuators scaled correctly; `verify_load` ignores default values on connected inputs; unit test for DayTimer entries and permission references.
 - **0.9.0** – `page_add`, `notification_add`, English tool descriptions, unit tests, recycle fallback outside Windows, `build_plan` ops `trennen`, `seite`, `mitteilung`, `kategorie_umhaengen`, `kategorie_loeschen`; empty virtual outputs can be removed; parser accepts attributes starting with a digit (newer Config files).
 - **0.8.0** – first public release.
